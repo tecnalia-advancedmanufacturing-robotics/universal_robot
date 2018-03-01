@@ -323,7 +323,16 @@ bool URKinematicsPlugin::initialize(const std::string &robot_description,
   max_solver_iterations_ = max_solver_iterations;
   epsilon_ = epsilon;
 
-  private_handle.param<std::string>("arm_prefix", arm_prefix_, "");
+  // Load the prefix name of the group
+  ros::NodeHandle nh;
+  std::string base_param_name = robot_description_ + "_kinematics/" + group_name_;
+  ROS_DEBUG_NAMED("kinematics_plugin_loader", "Looking for param %s ",
+                  (base_param_name + "/arm_prefix").c_str());
+  bool found = nh.searchParam(base_param_name + "/arm_prefix", arm_prefix_);
+  if(found)
+    nh.getParam(base_param_name + "/arm_prefix", arm_prefix_);
+  else
+    private_handle.param<std::string>("arm_prefix", arm_prefix_, "");
 
   ur_joint_names_.push_back(arm_prefix_ + "shoulder_pan_joint");
   ur_joint_names_.push_back(arm_prefix_ + "shoulder_lift_joint");
