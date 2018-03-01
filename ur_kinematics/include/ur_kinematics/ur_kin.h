@@ -71,6 +71,24 @@ namespace ur_kinematics {
   //                in case of an infinite solution on that joint.
   // @return        Number of solutions found (maximum of 8)
   int inverse(const double* T, double* q_sols, double q6_des=0.0);
-};
+
+  // @param q       The 6 joint values
+  //
+  // @return        An integer
+  //                - where the 3 lowest bits represent a class of configuration
+  //                    We define the segment as a line from the base to the tip of the arm
+  //                --- The lowest bit represents the solution for the first joint q0:
+  //                    xxx0 means the shoulder is on the LEFT when looking from the shoulder frame to the tip of the arm
+  //                    xxx1 is for RIGHT
+  //                --- The second lowest bit represents the solution for the wrist_2 joint q5
+  //                    xx0x means the wrist is OUT of the segment [arm base, arm tip]
+  //                    xx1x means the wrist is IN the segment
+  //                --- The third lowest bit represents the solution for the 3 plannar joints mechanism (q2, q3, q4)
+  //                    x0xx means the elbow link will be UP compared to the segment
+  //                    x1xx means DOWN
+  //                - where the 4th bit means a solution was found 1xxx or not 0xxx
+  int getConfigurationClass(double* q);
+
+} // end namespace ur_kinematics
 
 #endif //UR_KIN_H
