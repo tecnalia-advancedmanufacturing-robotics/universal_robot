@@ -166,6 +166,24 @@ namespace ur_kinematics
                             double search_discretization);
 
     /**
+     * @brief This function is used to obtained ALL the solutions (valid and not valid) to reach a desired pose of the end-effector.
+     *
+     * @param ik_poses  The desired pose of one tip link. If several pose are defined only the first is considered
+     * @param ik_seed_state an initial guess solution for the inverse kinematics
+     * @param solutions A vector of vectors where each entry is a valid joint solution
+     * @param result A struct that reports the results of the query
+     * @param options An option struct which contains the type of redundancy discretization used. This default
+     *                implementation only supports the KinematicSearches::NO_DISCRETIZATION method; requesting any
+     *                other will result in failure.
+     * @return True if a valid set of solutions was found, false otherwise.
+     */
+    virtual bool getPositionIK(const std::vector<geometry_msgs::Pose>& ik_poses,
+                               const std::vector<double>& ik_seed_state,
+                               std::vector<std::vector<double> >& solutions,
+                               kinematics::KinematicsResult& result,
+                               const kinematics::KinematicsQueryOptions& options) const;
+
+    /**
 * @brief Return all the joint names in the order they are used internally
 */
     const std::vector<std::string>& getJointNames() const;

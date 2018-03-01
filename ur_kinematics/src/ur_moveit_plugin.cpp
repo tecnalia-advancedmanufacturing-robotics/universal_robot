@@ -583,9 +583,13 @@ bool URKinematicsPlugin::searchPositionIK(const geometry_msgs::Pose &ik_pose,
     return false;
   }
 
+  double q_seed[6];
   KDL::JntArray jnt_seed_state(dimension_);
   for(int i=0; i<dimension_; i++)
+  {
     jnt_seed_state(i) = ik_seed_state[i];
+    q_seed[i] = ik_seed_state[i];
+  }
 
   solution.resize(dimension_);
 
@@ -645,8 +649,7 @@ bool URKinematicsPlugin::searchPositionIK(const geometry_msgs::Pose &ik_pose,
     // Do the analytic IK
     num_sols = inverse((double*) homo_ik_pose, (double*) q_ik_sols, 
                        jnt_pos_test(ur_joint_inds_start_+5));
-    
-    
+
     uint16_t num_valid_sols;
     std::vector< std::vector<double> > q_ik_valid_sols;
     for(uint16_t i=0; i<num_sols; i++)
@@ -687,8 +690,10 @@ bool URKinematicsPlugin::searchPositionIK(const geometry_msgs::Pose &ik_pose,
         q_ik_valid_sols.push_back(valid_solution);
       }
     }
-     
-     
+
+    // Get the class of configuration
+    int cc_seed = getConfigurationClass(q_seed);
+
     // use weighted absolute deviations to determine the solution closest the seed state
     std::vector<idx_double> weighted_diffs;
     for(uint16_t i=0; i<q_ik_valid_sols.size(); i++) {
@@ -702,6 +707,31 @@ bool URKinematicsPlugin::searchPositionIK(const geometry_msgs::Pose &ik_pose,
         }
         cur_weighted_diff += ik_weights_[j] * abs_diff;
       }
+
+      // Check if the class is similar to the one of the seed state
+      int cc;
+      double qs[6];
+      for(int j=0; j<6; j++)
+        qs[j] = q_ik_valid_sols[i][j];
+      cc = getConfigurationClass(qs);
+      if(i == 0  &&  cc_seed != cc){
+        ROS_WARN_STREAM("i = "<<i<<", cc_seed = "<<cc_seed<<" is != cc = "<<cc);
+      }
+      else if(i != 0  &&  cc_seed == cc){
+        ROS_WARN_STREAM("i = "<<i<<", cc_seed = "<<cc_seed<<" is should not be = to cc = "<<cc);
+      }
+
+      // If it is the same class of configuration put this solution at the top
+      if(cc == cc_seed)
+      {
+        cur_weighted_diff = 0.;
+      }
+      else
+      {
+        cur_weighted_diff = std::numeric_limits<double>::infinity();
+      }
+
+
       weighted_diffs.push_back(idx_double(i, cur_weighted_diff));
     }
 
@@ -773,6 +803,203 @@ bool URKinematicsPlugin::searchPositionIK(const geometry_msgs::Pose &ik_pose,
 
   ROS_DEBUG_NAMED("kdl","An IK that satisifes the constraints and is collision free could not be found");
   error_code.val = error_code.NO_IK_SOLUTION;
+  return false;
+}
+
+bool URKinematicsPlugin::getPositionIK(const std::vector<geometry_msgs::Pose>& ik_poses,
+                                       const std::vector<double>& ik_seed_state,
+                                       std::vector<std::vector<double> >& solutions,
+                                       kinematics::KinematicsResult& result,
+                                       const kinematics::KinematicsQueryOptions& options) const{
+  const geometry_msgs::Pose &ik_pose = ik_poses[0];
+  solutions.clear();
+
+  if(!active_) {
+    ROS_ERROR_NAMED("kdl","kinematics not active");
+    result.kinematic_error = kinematics::KinematicErrors::SOLVER_NOT_ACTIVE;
+    return false;
+  }
+
+  if(ik_seed_state.size() != dimension_) {
+    ROS_ERROR_STREAM_NAMED("kdl","Seed state must have size " << dimension_ << " instead of size " << ik_seed_state.size());
+    result.kinematic_error = kinematics::KinematicErrors::NO_SOLUTION;
+    return false;
+  }
+
+  double q_seed[6];
+  KDL::JntArray jnt_seed_state(dimension_);
+  for(int i=0; i<dimension_; i++)
+  {
+    jnt_seed_state(i) = ik_seed_state[i];
+    q_seed[i] = ik_seed_state[i];
+  }
+
+  std::vector<double> solution;
+  solution.resize(dimension_);
+
+  KDL::ChainFkSolverPos_recursive fk_solver_base(kdl_base_chain_);
+  KDL::ChainFkSolverPos_recursive fk_solver_tip(kdl_tip_chain_);
+
+  KDL::JntArray jnt_pos_test(jnt_seed_state);
+  KDL::JntArray jnt_pos_base(ur_joint_inds_start_);
+  KDL::JntArray jnt_pos_tip(dimension_ - 6 - ur_joint_inds_start_);
+  KDL::Frame pose_base, pose_tip;
+
+  KDL::Frame kdl_ik_pose;
+  KDL::Frame kdl_ik_pose_ur_chain;
+  double homo_ik_pose[4][4];
+  double q_ik_sols[8][6]; // maximum of 8 IK solutions
+  uint16_t num_sols;
+
+  while(1) {
+    /////////////////////////////////////////////////////////////////////////////
+    // find transformation from robot base to UR base and UR tip to robot tip
+    for(uint32_t i=0; i<jnt_pos_base.rows(); i++)
+      jnt_pos_base(i) = jnt_pos_test(i);
+    for(uint32_t i=0; i<jnt_pos_tip.rows(); i++)
+      jnt_pos_tip(i) = jnt_pos_test(i + ur_joint_inds_start_ + 6);
+    for(uint32_t i=0; i<jnt_seed_state.rows(); i++)
+      solution[i] = jnt_pos_test(i);
+
+    if(fk_solver_base.JntToCart(jnt_pos_base, pose_base) < 0) {
+      ROS_ERROR_NAMED("kdl", "Could not compute FK for base chain");
+      return false;
+    }
+
+    if(fk_solver_tip.JntToCart(jnt_pos_tip, pose_tip) < 0) {
+      ROS_ERROR_NAMED("kdl", "Could not compute FK for tip chain");
+      return false;
+    }
+    /////////////////////////////////////////////////////////////////////////////
+
+    /////////////////////////////////////////////////////////////////////////////
+    // Convert into query for analytic solver
+    tf::poseMsgToKDL(ik_pose, kdl_ik_pose);
+    kdl_ik_pose_ur_chain = pose_base.Inverse() * kdl_ik_pose * pose_tip.Inverse();
+
+    kdl_ik_pose_ur_chain.Make4x4((double*) homo_ik_pose);
+#if KDL_OLD_BUG_FIX
+    // in older versions of KDL, setting this flag might be necessary
+    for(int i=0; i<3; i++) homo_ik_pose[i][3] *= 1000; // strange KDL fix
+#endif
+    /////////////////////////////////////////////////////////////////////////////
+
+    // Do the analytic IK
+    num_sols = inverse((double*) homo_ik_pose, (double*) q_ik_sols,
+                       jnt_pos_test(ur_joint_inds_start_+5));
+
+
+    for (size_t i = 0;  i < num_sols; i++) {
+      std::cout<<"q_ik_sols["<<i<<"] = ";
+      for(size_t j=0; j<6; j++){
+        std::cout<<q_ik_sols[i][j]<<" ";
+      }
+      std::cout<<std::endl;
+    }
+
+    std::vector< std::vector<double> > q_ik_valid_sols;
+    bool check_bounds = true; // YOYO:DEBUG
+    for(uint16_t i=0; i<num_sols; i++)
+    {
+      if(check_bounds){
+        bool valid = true;
+        std::vector< double > valid_solution;
+        valid_solution.assign(6,0.0);
+
+        for(uint16_t j=0; j<6; j++)
+        {
+          if((q_ik_sols[i][j] <= ik_chain_info_.limits[j].max_position) && (q_ik_sols[i][j] >= ik_chain_info_.limits[j].min_position))
+          {
+            valid_solution[j] = q_ik_sols[i][j];
+            valid = true;
+            continue;
+          }
+          else if ((q_ik_sols[i][j] > ik_chain_info_.limits[j].max_position) && (q_ik_sols[i][j]-2*M_PI > ik_chain_info_.limits[j].min_position))
+          {
+            valid_solution[j] = q_ik_sols[i][j]-2*M_PI;
+            valid = true;
+            continue;
+          }
+          else if ((q_ik_sols[i][j] < ik_chain_info_.limits[j].min_position) && (q_ik_sols[i][j]+2*M_PI < ik_chain_info_.limits[j].max_position))
+          {
+            valid_solution[j] = q_ik_sols[i][j]+2*M_PI;
+            valid = true;
+            continue;
+          }
+          else
+          {
+            valid = false;
+            break;
+          }
+        }
+
+        if(valid)
+        {
+          q_ik_valid_sols.push_back(valid_solution);
+        }
+      }
+      else{ // Do not check bounds add directly the solutions
+        for(uint16_t j=0; j<6; j++)
+        {
+          valid_solution[j] = q_ik_sols[i][j];
+        }
+        q_ik_valid_sols.push_back(valid_solution);
+      }
+    }
+
+    // use weighted absolute deviations to determine the solution closest the seed state
+    std::vector<idx_double> weighted_diffs;
+    for(uint16_t i=0; i<q_ik_valid_sols.size(); i++) {
+      double cur_weighted_diff = 0;
+      for(uint16_t j=0; j<6; j++) {
+        double abs_diff = std::fabs(ik_seed_state[ur_joint_inds_start_+j] - q_ik_valid_sols[i][j]);
+        cur_weighted_diff += ik_weights_[j] * abs_diff;
+      }
+      weighted_diffs.push_back(idx_double(i, cur_weighted_diff));
+    }
+
+
+    std::sort(weighted_diffs.begin(), weighted_diffs.end(), comparator);
+
+    for(uint16_t i=0; i<weighted_diffs.size(); i++) {
+      if(weighted_diffs[i].second == std::numeric_limits<double>::infinity()) {
+        // rest are infinity, no more feasible solutions
+        break;
+      }
+
+      int cur_idx = weighted_diffs[i].first;
+      solution = q_ik_valid_sols[cur_idx];
+      solutions.push_back(solution);
+    }
+    // Checks the class of configuration
+    int cc_seed = getConfigurationClass(q_seed);
+    int cc;
+    for(size_t i=0; i<solutions.size(); i++){
+      double qs[6];
+      for(int j=0; j<6; j++)
+        qs[j] = solutions[i][j];
+      cc = getConfigurationClass(qs);
+      if(i == 0  &&  cc_seed != cc){
+        ROS_ERROR_STREAM("i = "<<i<<", cc_seed = "<<cc_seed<<" is != cc = "<<cc);
+      }
+      else if(i != 0  &&  cc_seed == cc){
+        ROS_ERROR_STREAM("i = "<<i<<", cc_seed = "<<cc_seed<<" is should not be = to cc = "<<cc);
+      }
+    }
+
+    if(solutions.size() > 0)
+    {
+      result.kinematic_error = kinematics::KinematicErrors::OK;
+      return true;
+    }
+    else{
+      result.kinematic_error = kinematics::KinematicErrors::NO_SOLUTION;
+      return false;
+    }
+  }
+
+  ROS_DEBUG_NAMED("kdl","An IK that satisifes the constraints and is collision free could not be found");
+  result.kinematic_error = kinematics::KinematicErrors::NO_SOLUTION;
   return false;
 }
 
